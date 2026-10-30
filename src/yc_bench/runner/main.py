@@ -7,10 +7,11 @@ import logging
 import os
 import sys
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import date, datetime, time, timezone
 from pathlib import Path
 
-from ..agent.commands.executor import run_command
+from ..agent.commands.executor import check_resolvable, run_command
 from ..agent.loop import run_agent_loop
 from ..agent.run_state import RunState, TerminalReason
 from ..agent.runtime.factory import build_runtime
@@ -59,6 +60,26 @@ def _wipe_simulation(db) -> None:
     db.flush()
 
 
+def _resolve_horizon_end(start_dt: datetime, horizon_years: int, until: str | None) -> datetime:
+    """Compute the episode's stop instant.
+
+    `until` (YYYY-MM-DD) wins over `horizon_years` when given. A fixed stop date
+    is what makes two arms comparable: both bank the same number of simulation
+    days, so the arm that happens to advance the clock faster cannot collect
+    extra payroll for free within the same turn budget.
+    """
+    if until:
+        until_dt = datetime.combine(
+            date.fromisoformat(until), time(9, 0), tzinfo=timezone.utc
+        )
+        if until_dt <= start_dt:
+            raise SystemExit(
+                f"ERROR: --until {until} must be after the start date {start_dt.date()}"
+            )
+        return until_dt
+    return start_dt.replace(year=start_dt.year + horizon_years)
+
+
 def _init_simulation(db_factory, args, experiment_cfg, horizon_years):
     """Seed world directly (no CLI round-trip) using the experiment WorldConfig."""
     from ..db.models.event import EventType
@@ -83,6 +104,16 @@ def _init_simulation(db_factory, args, experiment_cfg, horizon_years):
                 )
                 _wipe_simulation(db)
             else:
+                if getattr(args, "until", None):
+                    wanted = datetime.combine(
+                        date.fromisoformat(args.until), time(9, 0), tzinfo=timezone.utc
+                    )
+                    if existing.horizon_end != wanted:
+                        raise SystemExit(
+                            f"ERROR: this simulation was seeded with horizon_end="
+                            f"{existing.horizon_end} but --until {args.until} was given. "
+                            f"Add --fresh to reseed, or drop --until."
+                        )
                 logger.info(
                     "Resuming non-terminal simulation (company_id=%s, sim_time=%s).",
                     existing.company_id,
@@ -91,7 +122,13 @@ def _init_simulation(db_factory, args, experiment_cfg, horizon_years):
                 return existing.company_id
 
         start_dt = _parse_date(args.start_date)
-        horizon_end = start_dt.replace(year=start_dt.year + horizon_years)
+        horizon_end = _resolve_horizon_end(start_dt, horizon_years, getattr(args, "until", None))
+        if getattr(args, "until", None):
+            logger.info(
+                "--until active: episode ends at %s (overriding horizon_years=%d)",
+                horizon_end.isoformat(),
+                horizon_years,
+            )
         world = experiment_cfg.world
 
         req = SeedWorldRequest(
@@ -222,6 +259,14 @@ def run_benchmark(args):
     experiment_cfg = experiment_cfg.model_copy(
         update={"agent": experiment_cfg.agent.model_copy(update={"model": args.model})}
     )
+    # Reasoning/thinking effort: the CLI flag wins, the preset is the fallback.
+    # Normalising it back into args keeps db/result/memory filenames aligned
+    # with the effort actually used.
+    effective_effort = args.reasoning_effort or experiment_cfg.agent.reasoning_effort
+    if effective_effort != args.reasoning_effort:
+        args = replace(args, reasoning_effort=effective_effort)
+    if effective_effort:
+        logger.info("Reasoning/thinking effort: %s", effective_effort)
     # --horizon-years CLI flag overrides config; fall back to sim.horizon_years from config
     horizon_years = (
         args.horizon_years
@@ -247,6 +292,15 @@ def run_benchmark(args):
         args.max_episodes,
     )
 
+    # Fail before spending a single token: every agent tool call shells out to
+    # `yc-bench`, and on Windows the venv only ships `yc-bench.exe`. A bad
+    # resolution used to burn whole turns on identical WinError 2 failures.
+    tool_problem = check_resolvable()
+    if tool_problem:
+        logger.error("Tool execution unavailable: %s", tool_problem)
+        print(f"ERROR: {tool_problem}", file=sys.stderr)
+        raise SystemExit(2)
+
     # Build runtime settings (shared across episodes)
     agent_cfg = experiment_cfg.agent
     settings = RuntimeSettings(
@@ -259,8 +313,51 @@ def run_benchmark(args):
         history_keep_rounds=agent_cfg.history_keep_rounds,
         system_prompt=agent_cfg.system_prompt,
         reasoning_effort=args.reasoning_effort,
+        send_sampling_params=agent_cfg.send_sampling_params,
     )
     runtime = build_runtime(settings, command_executor=run_command)
+
+    # Structured memory (project plan variant (ii)). Built once per run; the
+    # event log is append-only so a crashed run can be replayed and audited.
+    memory = None
+    if experiment_cfg.memory.mode != "off":
+        from ..memory import MemorySettings, MemoryStore, StructuredMemory
+
+        mem_cfg = experiment_cfg.memory
+        mem_slug = args.model.replace("/", "_")
+        if args.reasoning_effort:
+            mem_slug = f"{mem_slug}_re-{args.reasoning_effort}"
+        mem_path = (
+            Path("db") / f"{args.config_name}_{args.seed}_{mem_slug}.memory.jsonl"
+            if mem_cfg.persist_events
+            else None
+        )
+        if (
+            mem_path is not None
+            and getattr(args, "fresh", False)
+            and mem_path.exists()
+        ):
+            # Otherwise --fresh would start a new world while the memory module
+            # reloaded the previous run's client history into the prompt.
+            logger.info("--fresh: removing %s", mem_path)
+            mem_path.unlink()
+        memory = StructuredMemory(
+            store=MemoryStore(mem_path),
+            settings=MemorySettings(
+                mode=mem_cfg.mode,
+                inject_client_view=mem_cfg.inject_client_view,
+                inject_staff_view=mem_cfg.inject_staff_view,
+                client_token_budget=mem_cfg.client_token_budget,
+                staff_token_budget=mem_cfg.staff_token_budget,
+                followup_reads=mem_cfg.followup_reads,
+            ),
+        )
+        logger.info(
+            "Structured memory enabled: mode=%s path=%s events_loaded=%d",
+            mem_cfg.mode,
+            mem_path,
+            len(memory.store),
+        )
 
     # Build run state (persists across episodes)
     session_id = f"run-{args.seed}-{args.model}"
@@ -272,6 +369,15 @@ def run_benchmark(args):
     )
 
     loop_cfg = experiment_cfg.loop
+    # --max-turns CLI flag overrides loop.max_turns from the config.
+    max_turns = args.max_turns if args.max_turns is not None else loop_cfg.max_turns
+    if max_turns is not None:
+        logger.info(
+            "Turn cap active: max_turns=%d (%s). A run that hits the cap ends with "
+            "terminal_reason=error, so its results are for debugging only.",
+            max_turns,
+            "--max-turns" if args.max_turns is not None else "config loop.max_turns",
+        )
     max_episodes = args.max_episodes
     carried_scratchpad = ""
 
@@ -280,6 +386,13 @@ def run_benchmark(args):
 
         # 1. Build engine for this episode's DB
         db_url = _build_db_url(args, episode, max_episodes)
+        if getattr(args, "fresh", False) and episode == 1:
+            # `--fresh` means what it says: no state survives from a previous
+            # invocation of the same config+seed+model.
+            db_file = Path(db_url.replace("sqlite:///", ""))
+            if db_file.exists():
+                logger.info("--fresh: removing %s", db_file)
+                db_file.unlink()
         os.environ["DATABASE_URL"] = db_url
         engine = build_engine()
         init_db(engine)
@@ -317,9 +430,17 @@ def run_benchmark(args):
         session_messages_path = (
             Path("db") / f"{args.config_name}_{args.seed}_{_slug}.session.json"
         )
-        _is_resume = transcript_path.exists() and session_messages_path.exists()
-        if not _is_resume and transcript_path.exists():
-            transcript_path.unlink()
+        _is_resume = (
+            transcript_path.exists()
+            and session_messages_path.exists()
+            and not getattr(args, "fresh", False)
+        )
+        if not _is_resume:
+            # A half-written transcript without a session file cannot be resumed;
+            # leaving it behind would make the next invocation look resumable.
+            for stale in (transcript_path, session_messages_path):
+                if stale.exists():
+                    stale.unlink()
 
         # Restore session messages on resume
         if _is_resume:
@@ -337,6 +458,15 @@ def run_benchmark(args):
                         prior_turns,
                         n_restored,
                     )
+                    if max_turns is not None and prior_turns >= max_turns:
+                        logger.error(
+                            "Resumed at turn %d but max_turns=%d: the loop will "
+                            "stop immediately. Raise --max-turns above %d, or "
+                            "pass --fresh to start over.",
+                            prior_turns,
+                            max_turns,
+                            prior_turns,
+                        )
                 except Exception:
                     pass
 
@@ -398,10 +528,11 @@ def run_benchmark(args):
                 run_state=run_state,
                 command_executor=run_command,
                 auto_advance_after_turns=loop_cfg.auto_advance_after_turns,
-                max_turns=loop_cfg.max_turns,
+                max_turns=max_turns,
                 on_turn_start=on_turn_start,
                 on_turn=on_turn,
                 episode=episode,
+                memory=memory,
             )
         finally:
             if dashboard is not None:
@@ -441,6 +572,8 @@ def run_benchmark(args):
     # 9. Save full rollout and print summary
     rollout = final_state.full_rollout()
     rollout["time_series"] = extract_time_series(db_factory, company_id)
+    if memory is not None:
+        rollout["memory"] = memory.diagnostics()
     summary = final_state.summary()
     logger.info("Run complete: %s", json.dumps(summary, indent=2))
 
@@ -449,9 +582,11 @@ def run_benchmark(args):
         slug = f"{slug}_re-{args.reasoning_effort}"
     results_dir = Path("results")
     results_dir.mkdir(exist_ok=True)
-    results_path = (
-        results_dir / f"yc_bench_result_{args.config_name}_{args.seed}_{slug}.json"
-    )
+    # `--config` accepts a preset name or a path to a .toml file; path separators
+    # must not leak into the output filename or the write lands in a missing dir.
+    config_slug = args.config_name.replace("\\", "_").replace("/", "_")
+    results_path = results_dir / f"yc_bench_result_{config_slug}_{args.seed}_{slug}.json"
+    results_path.parent.mkdir(parents=True, exist_ok=True)
     results_path.write_text(json.dumps(rollout, indent=2))
     logger.info("Full rollout written to %s", results_path)
 

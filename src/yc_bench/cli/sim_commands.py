@@ -107,6 +107,22 @@ def sim_init(
         )
 
 
+def _horizon_is_next_event(db, sim_state) -> bool:
+    """True when the only remaining event is the horizon-end event itself.
+
+    End of the horizon is a terminal checkpoint, not an action the agent has to
+    prepare for. Blocking `sim resume` on the "no active tasks" guard at that
+    point would leave the episode permanently stalled: the clock can never
+    reach the horizon, so no terminal reason is ever produced.
+    """
+    next_event = fetch_next_event(
+        db=db,
+        company_id=sim_state.company_id,
+        up_to=sim_state.horizon_end,
+    )
+    return next_event is not None and next_event.event_type is EventType.HORIZON_END
+
+
 @sim_app.command("resume")
 def sim_resume():
     """Advance simulation to the next actionable event (task completion, bankruptcy, or horizon end).
@@ -131,7 +147,7 @@ def sim_resume():
             )
             .count()
         )
-        if active_count == 0:
+        if active_count == 0 and not _horizon_is_next_event(db, sim_state):
             error_output(
                 "No active tasks. Accept and dispatch a task before calling sim resume. "
                 "Use: market browse → task accept → task dispatch → sim resume"
@@ -140,6 +156,7 @@ def sim_resume():
         # Keep advancing until we hit an actionable event (task completion,
         # bankruptcy, horizon end) or run out of events.
         # Only fast-forward past payrolls when there are active tasks to wait for.
+        old_sim_time = sim_state.sim_time
         all_wake_events = []
         total_balance_delta = 0
         total_payrolls = 0
@@ -206,7 +223,7 @@ def sim_resume():
         json_output(
             {
                 "ok": True,
-                "old_sim_time": sim_state.sim_time.isoformat(),
+                "old_sim_time": old_sim_time.isoformat(),
                 "new_sim_time": sim_state.sim_time.isoformat(),
                 "checkpoint_event_type": last_checkpoint_type,
                 "events_processed": total_events,

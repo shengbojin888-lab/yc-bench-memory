@@ -90,8 +90,9 @@ def _effective_rate_for_task_domain(
     rate/k to each. Total throughput is constant regardless of concurrency —
     no benefit to parallelizing beyond pipeline flexibility.
 
-    Brooks's Law: first 4 employees contribute full rate. Beyond that,
-    additional employees contribute at 25% (overcrowding overhead).
+    Brooks's Law: the first 4 employees contribute full rate. Any beyond that
+    contribute _OVERCROWD_PENALTY (currently 0, i.e. pure overhead) — they still
+    draw salary, so overstaffing a single task is strictly wasteful.
     """
     # Collect (employee_id, effective_base) for this task, sorted best-first
     contributions = []

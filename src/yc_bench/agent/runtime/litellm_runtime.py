@@ -43,6 +43,50 @@ _RUN_COMMAND_TOOL = {
 }
 
 
+# Provider -> env vars that may hold its API key, most specific first.
+# Providers that authenticate without a static key (e.g. vertex_ai via ADC) are
+# deliberately absent: they are neither checked nor passed an explicit key.
+_PROVIDER_KEY_ENVS: dict[str, tuple[str, ...]] = {
+    "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+    "anthropic": ("ANTHROPIC_API_KEY",),
+    "openai": ("OPENAI_API_KEY",),
+    "azure": ("AZURE_API_KEY",),
+    "azure_ai": ("AZURE_AI_API_KEY",),
+    "openrouter": ("OPENROUTER_API_KEY",),
+    "deepseek": ("DEEPSEEK_API_KEY",),
+    "groq": ("GROQ_API_KEY",),
+    "mistral": ("MISTRAL_API_KEY",),
+    "xai": ("XAI_API_KEY",),
+    "moonshot": ("MOONSHOT_API_KEY",),
+    "dashscope": ("DASHSCOPE_API_KEY",),
+    "zhipu": ("ZHIPUAI_API_KEY",),
+}
+
+
+def resolve_provider(model: str) -> str:
+    """Resolve the LiteLLM provider for a model string (offline, no network)."""
+    try:
+        _, provider, _, _ = litellm.get_llm_provider(model)
+        return provider
+    except Exception:  # noqa: BLE001 - unknown provider: fall back to the prefix
+        return model.split("/", 1)[0] if "/" in model else "openai"
+
+
+def resolve_api_key(model: str) -> tuple[str, str | None, str | None]:
+    """Return (provider, env_var_name, api_key_value) for a model string.
+
+    The key is looked up only among the env vars that belong to the detected
+    provider, so exporting several providers' keys at once cannot leak one
+    provider's key into another provider's request.
+    """
+    provider = resolve_provider(model)
+    for env_name in _PROVIDER_KEY_ENVS.get(provider, ()):
+        value = os.environ.get(env_name)
+        if value:
+            return provider, env_name, value
+    return provider, None, None
+
+
 @dataclass
 class _Session:
     messages: list = field(default_factory=list)
@@ -68,24 +112,51 @@ class LiteLLMRuntime(AgentRuntime):
         if self._retry_backoff_seconds <= 0:
             raise ValueError("retry_backoff_seconds must be > 0")
 
-        # API key: check provider-specific env vars, then generic fallbacks.
-        # LiteLLM reads these natively for their respective providers, but we
-        # also pass the key explicitly via kwargs to be safe.
-        self._api_key = (
-            os.environ.get("ANTHROPIC_API_KEY")
-            or os.environ.get("OPENAI_API_KEY")
-            or os.environ.get("OPENROUTER_API_KEY")
-            or None
+        # API key: resolved per provider from the environment, so a gemini/
+        # model picks up GEMINI_API_KEY even when other providers' keys are
+        # also exported. LiteLLM reads these natively too; we resolve them here
+        # so a missing key fails with an actionable message instead of an auth
+        # error halfway through a paid run.
+        self._provider, self._api_key_env, self._api_key = resolve_api_key(
+            settings.model
         )
+        if self._api_key is None and self._provider in _PROVIDER_KEY_ENVS:
+            hinted = " or ".join(_PROVIDER_KEY_ENVS[self._provider])
+            message = (
+                f"No API key found for provider '{self._provider}' "
+                f"(model={settings.model}). Set {hinted} in .env or the environment."
+            )
+            if os.environ.get("YC_BENCH_SKIP_KEY_CHECK"):
+                logger.warning("%s (YC_BENCH_SKIP_KEY_CHECK=1, continuing)", message)
+            else:
+                raise RuntimeError(message)
+
         # Base URL: only needed for raw OpenAI-compatible endpoints.
         # openrouter/ model prefix is handled natively by LiteLLM without this.
         self._api_base = os.environ.get("OPENAI_BASE_URL") or None
 
         self._history_keep_rounds = settings.history_keep_rounds
 
+        # Unknown model ids still work at the HTTP level, but LiteLLM cannot
+        # price them and may silently drop provider-specific params (e.g. the
+        # thinking-level mapping), which is the kind of quiet wrongness that
+        # ruins a sweep. Fail loudly at startup instead.
+        try:
+            litellm.get_model_info(settings.model)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "Model '%s' is not in LiteLLM's model map: cost will report $0 and "
+                "provider-specific params (reasoning/thinking control) may be dropped. "
+                "Check the model id against the provider's current name.",
+                settings.model,
+            )
+
         logger.info(
-            "LiteLLMRuntime configured: model=%s api_base=%s history_keep_rounds=%d",
+            "LiteLLMRuntime configured: model=%s provider=%s key_env=%s "
+            "api_base=%s history_keep_rounds=%d",
             self._settings.model,
+            self._provider,
+            self._api_key_env or "unset",
             self._api_base or "default",
             self._history_keep_rounds,
         )
@@ -288,6 +359,16 @@ class LiteLLMRuntime(AgentRuntime):
         )
         if self._api_base:
             kwargs["api_base"] = self._api_base
+        # Pass the provider's own key explicitly: this keeps one provider's key
+        # from ever being sent to another provider's endpoint.
+        if self._api_key:
+            kwargs["api_key"] = self._api_key
+        # Sampling parameters are opt-in (agent.send_sampling_params). The
+        # historical baseline was produced with provider defaults, so leaving
+        # this off keeps those runs reproducible.
+        if getattr(self._settings, "send_sampling_params", False):
+            kwargs["temperature"] = self._settings.temperature
+            kwargs["top_p"] = self._settings.top_p
         # Optional reasoning-effort knob, translated per provider.
         effort = getattr(self._settings, "reasoning_effort", None)
         model = self._settings.model

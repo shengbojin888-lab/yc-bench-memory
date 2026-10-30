@@ -1,0 +1,45 @@
+# YC-Bench preset: Gemini smoke test — variant (ii), structured memory on.
+#
+# Same world, model, prompts and turn cap as `debug_gemini`; the only
+# difference is the memory module. Run both back to back to confirm that
+# (ii) adds exactly one thing: the auto-recorded, evidence-linked view.
+#
+#   uv run yc-bench run --model gemini/gemini-3-flash-preview --seed 42 \
+#       --config debug_gemini_memory --no-live --max-turns 30
+#
+# `default_memory` is the uncapped equivalent for real benchmark runs.
+#
+# Comparability note (2026-10-30, revised twice): the system prompt is upstream
+# HEAD plus four shared changes (see `debug_gemini` for the list), including the
+# `task inspect` line and the team-cap line. Both arms receive the identical
+# text, so the only thing this preset adds over the baseline is the memory block
+# itself. The rendered view does label its ratio field (`qty on accept 4.0x`)
+# and quote the agent's own cancellation reason; runs recorded before that view
+# change are NOT comparable with runs after it.
+extends = "default"
+
+name        = "debug_gemini_memory"
+description = "Gemini smoke test, capped turns + structured memory (variant ii)"
+
+[agent]
+model = "gemini/gemini-3-flash-preview"
+reasoning_effort         = "disable"
+temperature              = 1.0
+send_sampling_params     = true
+request_timeout_seconds  = 300.0
+retry_max_attempts       = 3
+retry_backoff_seconds    = 2.0
+history_keep_rounds      = 20
+
+[loop]
+auto_advance_after_turns = 3
+max_turns = 30
+
+[memory]
+mode = "structured"
+inject_client_view = true
+inject_staff_view  = false
+client_token_budget = 300
+staff_token_budget  = 150
+followup_reads      = true
+persist_events      = true

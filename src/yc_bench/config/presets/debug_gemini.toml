@@ -1,0 +1,60 @@
+# YC-Bench preset: Gemini smoke test — variant (i), scratchpad only.
+#
+# Identical world and mechanics to `default`; the only differences are the
+# model defaults and a hard turn cap so a debugging run costs cents instead of
+# a few dollars. Use it to confirm the Gemini plumbing works, not to collect
+# benchmark numbers: a run that hits the cap ends with terminal_reason=error.
+#
+# Run:
+#   uv run yc-bench run --model gemini/gemini-3-flash-preview --seed 42 \
+#       --config debug_gemini --no-live --max-turns 30
+#
+# Raise the cap (or pass --max-turns N) once the run looks healthy.
+#
+# Comparability note (2026-10-30, revised twice): the system prompt is upstream
+# HEAD plus four shared changes — every one of them is either a factual
+# correction or a mechanism fact the simulator already enforces, and both arms
+# receive the identical text:
+#   - the first-turn checklist named `task assign-all`, a command this build
+#     disables (it errored on turn 1 of every run);
+#   - the idle warning described `sim resume` as burning payroll when it is in
+#     fact refused;
+#   - one line stating that `task inspect` reveals the accepted task's real
+#     requirement, which can differ from the listing. This names the interface
+#     only, never which clients inflate or by how much — that pattern is still
+#     something variant (ii) has to learn from its own log;
+#   - one line stating the team cap: only the 4 fastest contributors count on a
+#     task, later assignees produce nothing but are still paid. Added because
+#     the 20-turn comparison showed staffing variance swamping the memory
+#     effect (variant i staffed with 4 on 18/19 tasks, variant ii with
+#     2/3/5/8). This is a mechanism fact, symmetric across arms: it removes a
+#     confound without revealing anything about clients.
+# Deliberately still silent: failure clawback, cancellation cost, deadline
+# formula, prestige scaling. Runs are comparable with anything from this build,
+# NOT with runs from before these changes.
+extends = "default"
+
+name        = "debug_gemini"
+description = "Gemini smoke test, capped turns (variant i baseline)"
+
+[agent]
+model = "gemini/gemini-3-flash-preview"
+# Gemini 3 cannot fully disable thinking; "disable" maps to thinkingLevel
+# "minimal" with thoughts excluded from the response (LiteLLM translation).
+reasoning_effort         = "disable"
+# Gemini 3 is tuned for temperature 1.0; Google warns that lowering it can
+# cause looping/repetition. Sent explicitly so the value is on the record.
+temperature              = 1.0
+send_sampling_params     = true
+request_timeout_seconds  = 300.0
+retry_max_attempts       = 3
+retry_backoff_seconds    = 2.0
+history_keep_rounds      = 20
+
+[loop]
+auto_advance_after_turns = 3
+# Hard cap for debugging. Passing --max-turns on the CLI wins over this value.
+max_turns = 30
+
+[memory]
+mode = "off"

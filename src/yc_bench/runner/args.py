@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import argparse
+import datetime
 from pathlib import Path
 
 
@@ -16,6 +17,13 @@ class RunArgs:
     no_live: bool = False
     max_episodes: int = 1
     reasoning_effort: str | None = None
+    # Overrides loop.max_turns from the config when set (debug/smoke runs).
+    max_turns: int | None = None
+    # Ignore any leftover DB / transcript / session / memory log and start over.
+    fresh: bool = False
+    # Fixed calendar stop date (YYYY-MM-DD). Overrides horizon_years so that two
+    # arms compared at equal wall-clock exposure end on the same sim day.
+    until: str | None = None
 
 
 def build_parser():
@@ -58,6 +66,29 @@ def build_parser():
         help="Reasoning-effort level passed to the model (e.g. minimal/low/medium/high/xhigh). "
         "Omit for provider-default reasoning. Also tags output filenames so sweeps don't collide.",
     )
+    parser.add_argument(
+        "--max-turns",
+        type=int,
+        default=None,
+        help="Hard cap on LLM turns, overriding loop.max_turns from the config. "
+        "Use a small value (e.g. 20) to smoke-test a model without running a full year.",
+    )
+    parser.add_argument(
+        "--fresh",
+        action="store_true",
+        default=False,
+        help="Discard leftover DB / transcript / session / memory log for this "
+        "config+seed+model and start a new episode. Without it a non-terminal "
+        "simulation is resumed and prior turns count against --max-turns.",
+    )
+    parser.add_argument(
+        "--until",
+        default=None,
+        help="Fixed calendar date (YYYY-MM-DD) at which the episode ends. Overrides "
+        "--horizon-years. Use this so two arms compared against each other stop on "
+        "the same simulation day - otherwise the arm that advances the clock faster "
+        "banks more elapsed time (and more payroll) for the same turn budget.",
+    )
     return parser
 
 
@@ -75,6 +106,9 @@ def parse_run_args(argv):
         no_live=ns.no_live,
         max_episodes=ns.max_episodes,
         reasoning_effort=ns.reasoning_effort,
+        max_turns=ns.max_turns,
+        fresh=ns.fresh,
+        until=ns.until,
     )
 
 
@@ -83,6 +117,13 @@ def _validate(ns, parser):
         parser.error("--horizon-years must be int > 0")
     if ns.max_episodes < 1:
         parser.error("--max-episodes must be int >= 1")
+    if ns.max_turns is not None and ns.max_turns < 1:
+        parser.error("--max-turns must be int >= 1")
+    if ns.until is not None:
+        try:
+            datetime.date.fromisoformat(ns.until)
+        except ValueError:
+            parser.error("--until must be a date in YYYY-MM-DD form")
 
 
 __all__ = ["RunArgs", "build_parser", "parse_run_args"]

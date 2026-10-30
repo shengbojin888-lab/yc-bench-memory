@@ -1,20 +1,46 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 from .policy import parse_bench_command
 
+# Windows console scripts are generated with an extension; on POSIX they are
+# bare names. Checking only "yc-bench" silently fell back to a PATH lookup that
+# fails unless the venv is activated, so every tool call errored with WinError 2.
+_SCRIPT_NAMES = (
+    ("yc-bench.exe", "yc-bench.cmd", "yc-bench.bat", "yc-bench")
+    if os.name == "nt"
+    else ("yc-bench",)
+)
+
 
 def _resolve_yc_bench() -> str:
     """Find the yc-bench script in the same directory as the running Python."""
     venv_bin = Path(sys.executable).parent
-    candidate = venv_bin / "yc-bench"
-    if candidate.exists():
-        return str(candidate)
-    return "yc-bench"  # fallback to PATH lookup
+    for name in _SCRIPT_NAMES:
+        candidate = venv_bin / name
+        if candidate.exists():
+            return str(candidate)
+    found = shutil.which("yc-bench")
+    if found:
+        return found
+    return "yc-bench"  # last resort: let subprocess report the failure
+
+
+def check_resolvable() -> str | None:
+    """Return a human-readable problem if tool calls could not run, else None."""
+    resolved = _resolve_yc_bench()
+    if Path(resolved).exists() or shutil.which(resolved):
+        return None
+    return (
+        f"cannot locate the `yc-bench` executable (looked for "
+        f"{', '.join(_SCRIPT_NAMES)} next to {sys.executable} and on PATH); "
+        "every tool call would fail before the first turn"
+    )
 
 
 def run_command(
@@ -86,4 +112,4 @@ def run_command(
         }
 
 
-__all__ = ["run_command"]
+__all__ = ["check_resolvable", "run_command"]

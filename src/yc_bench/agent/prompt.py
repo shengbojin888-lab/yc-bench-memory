@@ -46,7 +46,9 @@ Run multiple tasks concurrently when possible. Accept → assign → dispatch a 
 
 - **Salary bumps**: completed tasks raise salary for every assigned employee. More employees assigned = higher payroll growth.
 - **Throughput split**: employees on multiple active tasks split their rate (rate/N). Two tasks run at 50% each.
+- **Team size**: on one task only the 4 fastest contributors are counted. Beyond that, the 5th employee and later contribute nothing to that task but are paid all the same. Staffing a second task with the other four therefore adds output, whereas stacking all 8 on one task adds none.
 - **Deadlines**: success before deadline = reward + prestige. Failure = prestige penalty, no reward.
+- **Accepted workload**: `task inspect` reports what an accepted task actually requires. That quantity is fixed when you accept it, and it does not always match the amount the listing advertised.
 - **Trust**: completing tasks for a client builds trust → less work per task, access to gated tasks. Working for one client erodes trust with others.
 - **Not all clients are reliable.** Check `client history` for failure patterns.
 - **Payroll**: deducted monthly. Funds < 0 = bankruptcy.
@@ -150,13 +152,13 @@ def build_turn_context(
     if active_tasks == 0 and planned_tasks == 0:
         parts.append(
             "\n**ACTION REQUIRED**: No tasks are running. "
-            "Do NOT call `sim resume` — it will just burn payroll with zero revenue. "
+            "Do NOT call `sim resume` — it is rejected while nothing is active. "
             "Accept a task, assign employees to it, and dispatch it first."
         )
     elif planned_tasks > 0 and active_tasks == 0:
         parts.append(
             "\n**ACTION REQUIRED**: You have planned tasks but none are dispatched. "
-            "Do NOT call `sim resume` yet — dispatch first or you'll just burn payroll. "
+            "Do NOT call `sim resume` yet — it is rejected until one is dispatched. "
             "Assign employees and dispatch now."
         )
     else:
@@ -225,13 +227,16 @@ def build_initial_user_prompt(
             "Complete these steps now (multiple commands per turn are fine):",
             "1. `yc-bench market browse` — see available tasks",
             "2. `yc-bench task accept --task-id Task-42` — accept a task",
-            "3. `yc-bench task assign-all --task-id Task-42` — assign employees (or use `task assign` to pick individuals)",
+            # Upstream pointed at `task assign-all`, which is a disabled stub in
+            # this build: it returns an error on turn 1 of every run. Same
+            # sentence, same "pick" wording, only the command name is corrected.
+            "3. `yc-bench task assign --task-id Task-42 --employees Emp_1,Emp_4,Emp_7` — assign employees (or use `task assign` to pick individuals)",
             "4. `yc-bench task dispatch --task-id Task-42` — start work",
             "5. `yc-bench sim resume` — advance time",
             "",
             "**IMPORTANT**: Check each command's result before proceeding to the next.",
             "If `task accept` fails (trust or prestige too low), try a different task.",
-            "Do NOT call `sim resume` unless you have at least one active task — it will skip forward with zero revenue.",
+            "Do NOT call `sim resume` unless you have at least one active task — it is rejected.",
         ]
     )
     if bankrupt:

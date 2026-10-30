@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -16,6 +17,25 @@ from .runtime.base import AgentRuntime
 from .runtime.schemas import RuntimeTurnRequest
 
 logger = logging.getLogger(__name__)
+
+# How many consecutive `sim resume` attempts may fail to move the clock before
+# the episode is terminated. Without this the loop can spin indefinitely when
+# the simulator is frozen but no terminal event has fired.
+STALL_LIMIT = 3
+
+# Consecutive turns the agent may spend with nothing running before the episode
+# is abandoned. Looking at two or three offers before committing is legitimate
+# behaviour; never committing is not, and the clock cannot move in the meantime.
+IDLE_TURN_LIMIT = 6
+
+# Error text `sim resume` emits when it refuses to advance because no task is
+# active. Recoverable: the agent can still accept one this very turn.
+_IDLE_ERROR_RE = re.compile(r"no active tasks", re.IGNORECASE)
+
+
+def _is_idle_error(reason: str) -> bool:
+    """True when an advance failed only because nothing is running."""
+    return bool(_IDLE_ERROR_RE.search(reason or ""))
 
 
 def _snapshot_state(db: Session, company_id):
@@ -150,9 +170,57 @@ def run_agent_loop(
     on_turn_start=None,
     on_turn=None,
     episode: int = 1,
+    memory=None,
 ) -> RunState:
     run_state.start()
     turns_since_resume = 0  # consecutive turns without sim resume
+    stalled_advances = 0  # consecutive advance attempts that did not move the clock
+    idle_turns = 0  # consecutive turns spent with nothing running
+    prev_sim_time = None
+
+    def _register_stall(reason: str) -> None:
+        """Count a useless advance attempt; end the episode once it repeats.
+
+        ``sim resume`` refuses to advance while no task is active. That is a
+        *recoverable* state — the agent can still go and accept one — so it is
+        counted separately from a genuinely frozen clock. Conflating the two
+        would kill an episode the moment the agent browsed twice before
+        committing, which is exactly the deliberation the memory variants are
+        supposed to enable.
+        """
+        nonlocal stalled_advances, idle_turns
+        if _is_idle_error(reason):
+            idle_turns += 1
+            logger.warning(
+                "Idle turn (%d/%d) — nothing running: %s",
+                idle_turns,
+                IDLE_TURN_LIMIT,
+                reason,
+            )
+            if idle_turns >= IDLE_TURN_LIMIT:
+                logger.error(
+                    "No active tasks for %d consecutive turns; ending episode.",
+                    idle_turns,
+                )
+                run_state.mark_terminal(
+                    TerminalReason.ERROR,
+                    f"no active tasks for {idle_turns} consecutive turns",
+                )
+            return
+        idle_turns = 0
+        stalled_advances += 1
+        logger.warning(
+            "Advance made no progress (%d in a row): %s", stalled_advances, reason
+        )
+        if stalled_advances >= STALL_LIMIT:
+            logger.error(
+                "Simulation stalled after %d consecutive non-advancing resumes: %s",
+                stalled_advances,
+                reason,
+            )
+            run_state.mark_terminal(
+                TerminalReason.ERROR, f"simulation stalled: {reason}"
+            )
 
     logger.info(
         "Starting agent loop: model=%s seed=%d auto_advance_after=%d turns max_turns=%s",
@@ -185,6 +253,15 @@ def run_agent_loop(
                 **snapshot,
             )
 
+        if memory is not None:
+            # Structured-memory view (variant (ii)). Injected at the tail of the
+            # turn's user message, i.e. the same message that carries the state
+            # snapshot, so the baseline and the memory variant share one prompt
+            # layout and differ only in what has been remembered.
+            block = memory.context_block()
+            if block:
+                user_input = f"{user_input}\n\n{block}"
+
         if on_turn_start is not None:
             on_turn_start(turn_num)
 
@@ -208,6 +285,7 @@ def run_agent_loop(
         if result.checkpoint_advanced and resume_payload is not None:
             logger.info("Turn %d: agent called sim resume.", turn_num)
             turns_since_resume = 0
+            idle_turns = 0
         else:
             turns_since_resume += 1
             if (
@@ -222,12 +300,14 @@ def run_agent_loop(
                 resume_payload, err = _auto_resume(command_executor)
                 if err:
                     logger.warning("Auto-resume failed on turn %d: %s", turn_num, err)
+                    _register_stall(err)
                 else:
                     turns_since_resume = 0
+                    idle_turns = 0
 
         if resume_payload is not None:
             # Query full state so the agent sees active/planned task counts
-            # and gets the "ACTION REQUIRED" nudge when idle.
+            # and gets the idle-state note when nothing is running.
             wake_events = resume_payload.get("wake_events") or []
             with db_factory() as db:
                 post_resume_snapshot = _snapshot_state(db, company_id)
@@ -244,6 +324,23 @@ def run_agent_loop(
             if run_state.terminal:
                 logger.info("Terminal after turn %d: %s", turn_num, reason)
 
+            # A failed or non-advancing `sim resume` (e.g. the "no active tasks"
+            # guard firing while the simulation is otherwise frozen) must not be
+            # able to spin the loop forever. Count consecutive dead advances and
+            # end the episode instead of burning turns.
+            stalled = bool(resume_payload.get("error")) or (
+                not run_state.terminal
+                and prev_sim_time is not None
+                and post_resume_snapshot["sim_time"] == prev_sim_time
+            )
+            if stalled:
+                _register_stall(
+                    resume_payload.get("error") or "sim_time did not advance"
+                )
+            else:
+                stalled_advances = 0
+                idle_turns = 0
+
         raw = getattr(result, "raw_result", {}) or {}
         run_state.record_turn(
             user_input=user_input,
@@ -254,9 +351,25 @@ def run_agent_loop(
             completion_tokens=raw.get("completion_tokens", 0),
         )
 
+        with db_factory() as db:
+            post_snapshot = _snapshot_state(db, company_id)
+
+        if memory is not None:
+            # Extract structured records from what the agent just observed.
+            # Runs after the turn (not inside it) so it can never influence the
+            # current decision, and never calls the model.
+            memory.observe_turn(
+                turn=turn_num,
+                tool_calls=(getattr(result, "raw_result", {}) or {}).get(
+                    "tool_calls"
+                ),
+                sim_time=prev_sim_time or post_snapshot["sim_time"],
+                executor=command_executor,
+            )
+
+        prev_sim_time = post_snapshot["sim_time"]
+
         if on_turn is not None:
-            with db_factory() as db:
-                post_snapshot = _snapshot_state(db, company_id)
             on_turn(post_snapshot, run_state, commands_executed)
 
         logger.info(

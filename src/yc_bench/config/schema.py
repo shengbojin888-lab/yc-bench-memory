@@ -6,6 +6,8 @@ models — Pydantic catches typos and type errors at load time.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field, model_validator
 
 from .sampling import (
@@ -91,6 +93,15 @@ class AgentConfig(BaseModel):
     retry_backoff_seconds: float = 1.0
     # Conversation rounds kept in context before each API call; older rounds dropped.
     history_keep_rounds: int = 20
+    # Send temperature/top_p to the provider. Default false reproduces the
+    # historical baseline, which ran with provider defaults.
+    send_sampling_params: bool = False
+    # Reasoning/thinking effort passed to the provider (translated by LiteLLM:
+    # Gemini 3 -> thinkingLevel, OpenAI -> reasoning_effort, Anthropic ->
+    # thinking budget). "disable"/"none" picks the model's lowest thinking
+    # level. The --reasoning-effort CLI flag overrides this. None = provider
+    # default.
+    reasoning_effort: str | None = None
     # Optional system prompt override. None = use default from agent/prompt.py
     system_prompt: str | None = None
 
@@ -105,6 +116,38 @@ class LoopConfig(BaseModel):
     auto_advance_after_turns: int = 10
     # Hard cap on total turns. null = unlimited.
     max_turns: int | None = None
+
+
+# ---------------------------------------------------------------------------
+# Memory
+# ---------------------------------------------------------------------------
+
+
+class MemoryConfig(BaseModel):
+    """Structured memory (project plan variant (ii)).
+
+    ``mode = "off"`` reproduces the baseline byte-for-byte: the memory module is
+    never constructed and no extra tokens enter the prompt. ``mode =
+    "structured"`` extracts append-only, evidence-linked records from the
+    agent's own command output and renders a budgeted view into each turn.
+
+    The module never revises records (variant (iii)) and never ranks by
+    relevance (variant (iv)); those stay behind separate flags so the ablation
+    ladder remains measurable.
+    """
+
+    mode: Literal["off", "structured"] = "off"
+    # Which views to render. Client view first; staffing is opt-in.
+    inject_client_view: bool = True
+    inject_staff_view: bool = False
+    # Fixed budget shared by all variants, expressed in tokens (~chars / 4).
+    client_token_budget: int = 300
+    staff_token_budget: int = 150
+    # Issue a read-only `task inspect` right after an accept so the accepted
+    # workload is captured even when the agent never inspects on its own.
+    followup_reads: bool = True
+    # Persist the event log next to the db/transcript for auditing.
+    persist_events: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +328,7 @@ class ExperimentConfig(BaseModel):
     description: str = ""
     agent: AgentConfig = Field(default_factory=AgentConfig)
     loop: LoopConfig = Field(default_factory=LoopConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
     sim: SimConfig = Field(default_factory=SimConfig)
     world: WorldConfig = Field(default_factory=WorldConfig)
 
@@ -294,6 +338,7 @@ __all__ = [
     "DistSpec",
     "ExperimentConfig",
     "LoopConfig",
+    "MemoryConfig",
     "SalaryTierConfig",
     "SimConfig",
     "WorldConfig",

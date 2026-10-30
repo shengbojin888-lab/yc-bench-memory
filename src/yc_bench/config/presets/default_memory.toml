@@ -1,0 +1,33 @@
+# YC-Bench preset: default world + structured memory (project plan variant (ii))
+#
+# Same world, same model, same prompts outside the memory module as `default`;
+# the only difference is that observations are converted into append-only,
+# evidence-linked records and a budgeted view is rendered into each turn.
+#
+# Run:
+#   uv run yc-bench run --model <model> --seed 42 --config default_memory --no-live
+#
+# Ablation ladder (each step adds exactly one capability):
+#   (i)   default                        scratchpad only
+#   (ii)  default_memory                 + structured extraction (this file)
+#   (iii) ...                            + revising/merging stale records
+#   (iv)  ...                            + relevance-ranked retrieval
+extends = "default"
+
+name = "default_memory"
+description = "Default world + structured memory (variant ii)"
+
+[memory]
+mode = "structured"
+# Client memory first; staffing can be turned on independently.
+inject_client_view = true
+inject_staff_view = false
+# Fixed budget, identical across memory variants (~chars / 4).
+client_token_budget = 300
+staff_token_budget = 150
+# Read the accepted workload once via `task inspect` after an accept: the
+# accept response does not carry required_qty, so without this read the
+# advertised-vs-accepted comparison cannot be formed at all.
+followup_reads = true
+# Event log is written next to db/ and the transcript for auditing/replay.
+persist_events = true

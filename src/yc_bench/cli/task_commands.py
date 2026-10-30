@@ -427,7 +427,8 @@ def task_dispatch(
         )
         if existing_count == 0:
             error_output(
-                "No employees assigned. Use `task assign-all` or `task assign --employee-id Emp_1` first."
+                "No employees assigned. Use `task assign --task-id <ID> "
+                "--employees Emp_1,Emp_4,Emp_7` first."
             )
             db.flush()
 

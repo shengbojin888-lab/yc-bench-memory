@@ -19,6 +19,9 @@ class RuntimeSettings:
     # provider: OpenAI reasoning_effort, Anthropic thinking budget, etc.).
     # None = provider default reasoning.
     reasoning_effort: str | None = None
+    # Send temperature/top_p to the provider. Off by default because the
+    # published baseline used provider defaults (the params were never sent).
+    send_sampling_params: bool = False
 
 
 @dataclass(frozen=True)

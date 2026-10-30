@@ -134,6 +134,25 @@ def run_command_cli(
         help="Reasoning-effort level (e.g. low/medium/high/max). Omit for provider default. "
         "Tags output filenames so sweeps don't collide.",
     ),
+    max_turns: Optional[int] = typer.Option(
+        None,
+        "--max-turns",
+        help="Hard cap on LLM turns, overriding loop.max_turns. Small values (e.g. 20) "
+        "smoke-test a model without running a full year.",
+    ),
+    fresh: bool = typer.Option(
+        False,
+        "--fresh",
+        help="Discard leftover DB / transcript / session / memory log for this "
+        "config+seed+model and start a new episode.",
+    ),
+    until: Optional[str] = typer.Option(
+        None,
+        "--until",
+        help="Fixed calendar date (YYYY-MM-DD) at which the episode ends, overriding "
+        "--horizon-years. Two arms given the same --max-turns otherwise stop on "
+        "different simulation days, so final funds measure elapsed time, not skill.",
+    ),
 ):
     """Run a full benchmark: migrate DB, seed world, run agent loop to completion."""
     from dotenv import find_dotenv, load_dotenv
@@ -153,6 +172,9 @@ def run_command_cli(
         no_live=no_live,
         max_episodes=max_episodes,
         reasoning_effort=reasoning_effort,
+        max_turns=max_turns,
+        fresh=fresh,
+        until=until,
     )
     raise SystemExit(run_benchmark(args))
 

@@ -27,6 +27,8 @@ Environment variable overrides (applied last, highest priority)::
     YC_BENCH_TOP_P                override agent.top_p
     YC_BENCH_HISTORY_KEEP_ROUNDS  override agent.history_keep_rounds
     YC_BENCH_AUTO_ADVANCE_TURNS   override loop.auto_advance_after_turns
+    YC_BENCH_MAX_TURNS            override loop.max_turns
+    YC_BENCH_MEMORY_MODE          override memory.mode (off | structured)
 """
 
 from __future__ import annotations
@@ -104,6 +106,7 @@ def _apply_env_overrides(cfg: ExperimentConfig) -> ExperimentConfig:
     """YC_BENCH_* env vars always win, regardless of config file."""
     agent_updates: dict = {}
     loop_updates: dict = {}
+    memory_updates: dict = {}
 
     if v := os.environ.get("YC_BENCH_MODEL"):
         agent_updates["model"] = v
@@ -115,6 +118,10 @@ def _apply_env_overrides(cfg: ExperimentConfig) -> ExperimentConfig:
         agent_updates["history_keep_rounds"] = int(v)
     if v := os.environ.get("YC_BENCH_AUTO_ADVANCE_TURNS"):
         loop_updates["auto_advance_after_turns"] = int(v)
+    if v := os.environ.get("YC_BENCH_MAX_TURNS"):
+        loop_updates["max_turns"] = int(v)
+    if v := os.environ.get("YC_BENCH_MEMORY_MODE"):
+        memory_updates["mode"] = v
 
     if agent_updates:
         cfg = cfg.model_copy(
@@ -122,6 +129,10 @@ def _apply_env_overrides(cfg: ExperimentConfig) -> ExperimentConfig:
         )
     if loop_updates:
         cfg = cfg.model_copy(update={"loop": cfg.loop.model_copy(update=loop_updates)})
+    if memory_updates:
+        cfg = cfg.model_copy(
+            update={"memory": cfg.memory.model_copy(update=memory_updates)}
+        )
     return cfg
 
 
