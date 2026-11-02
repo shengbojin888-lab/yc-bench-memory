@@ -25,6 +25,7 @@ class MemoryStore:
     """A tiny append-only event log with an in-memory mirror."""
 
     def __init__(self, path: str | Path | None = None) -> None:
+        """Open the log at ``path`` (``None`` keeps it memory-only)."""
         self.path = Path(path) if path is not None else None
         self._events: list[MemoryEvent] = []
         self._load()
@@ -32,6 +33,7 @@ class MemoryStore:
     # -- reading ----------------------------------------------------------
 
     def _load(self) -> None:
+        """Read whatever is already on disk; a corrupt tail is skipped, not fatal."""
         if self.path is None or not self.path.exists():
             return
         bad = 0
@@ -51,6 +53,7 @@ class MemoryStore:
         )
 
     def events(self) -> list[MemoryEvent]:
+        """A copy of every event, in write order."""
         return list(self._events)
 
     def __len__(self) -> int:
@@ -59,6 +62,7 @@ class MemoryStore:
     # -- writing ----------------------------------------------------------
 
     def append(self, event: MemoryEvent) -> None:
+        """Append one validated event and flush it to disk immediately."""
         validate_event(event)
         self._events.append(event)
         if self.path is None:
@@ -68,6 +72,7 @@ class MemoryStore:
             fh.write(json.dumps(event.to_dict(), ensure_ascii=False) + "\n")
 
     def append_many(self, events: Iterable[MemoryEvent]) -> int:
+        """Append each event in turn; returns how many were written."""
         count = 0
         for ev in events:
             self.append(ev)

@@ -92,10 +92,12 @@ class TaskRecord:
 
     @property
     def advertised_max(self) -> float | None:
+        """Largest listed quantity across domains (listings price per domain)."""
         return max(self.advertised_qty.values()) if self.advertised_qty else None
 
     @property
     def observed_max(self) -> float | None:
+        """Largest accepted quantity across domains, as reported by inspect."""
         return max(self.observed_qty.values()) if self.observed_qty else None
 
     @property
@@ -108,6 +110,7 @@ class TaskRecord:
 
     @property
     def creep_source(self) -> str:
+        """Which observations the ratio rests on, so its weight is visible."""
         if self.advertised_max and self.observed_max:
             return "browse+inspect"
         if self.observed_max:
@@ -117,6 +120,8 @@ class TaskRecord:
 
 @dataclass
 class ClientStat:
+    """Per-client tallies folded from every accepted task of that client."""
+
     client: str
     accepted: int = 0
     ok: int = 0
@@ -131,11 +136,17 @@ class ClientStat:
 
     @property
     def creep_mean(self) -> float | None:
+        """Average accepted/listed ratio, or None if nothing was measured.
+
+        A plain mean, not a recency-weighted one: revising a stale figure is the
+        capability variant (iii) adds, so doing it here would blur the two.
+        """
         if not self.creep_ratios:
             return None
         return round(sum(self.creep_ratios) / len(self.creep_ratios), 1)
 
     def check_invariant(self) -> None:
+        """Assert every accepted task falls into exactly one outcome bucket."""
         total = self.ok + self.fail + self.cancelled + self.in_flight
         if total != self.accepted:
             raise AssertionError(
@@ -146,6 +157,8 @@ class ClientStat:
 
 @dataclass
 class StaffStat:
+    """Per-employee tallies folded from the tasks they were assigned to."""
+
     employee: str
     tasks: int = 0
     ok: int = 0
@@ -156,6 +169,7 @@ class StaffStat:
 
     @property
     def margin_mean(self) -> float | None:
+        """Mean deadline margin in hours; negative means late on average."""
         if not self.margins:
             return None
         return round(sum(self.margins) / len(self.margins), 1)
@@ -251,6 +265,11 @@ def client_stats(records: dict[str, TaskRecord]) -> list[ClientStat]:
 
 
 def staff_stats(records: dict[str, TaskRecord]) -> list[StaffStat]:
+    """Aggregate assignments per employee, busiest first.
+
+    One task counts once per employee assigned to it, so summing ``tasks``
+    across staff gives staffing slots, not the number of jobs done.
+    """
     stats: dict[str, StaffStat] = {}
     for rec in records.values():
         domain = max(rec.observed_qty, key=rec.observed_qty.get) if rec.observed_qty else None
@@ -278,6 +297,11 @@ def staff_stats(records: dict[str, TaskRecord]) -> list[StaffStat]:
 
 
 def estimate_tokens(text: str) -> int:
+    """Rough token count, used only to enforce the view's budget.
+
+    See ``CHARS_PER_TOKEN`` for why this is a division rather than a real
+    tokeniser: the budget has to mean the same thing in every variant.
+    """
     return math.ceil(len(text) / CHARS_PER_TOKEN)
 
 
@@ -305,6 +329,7 @@ def _shorten(text: str, limit: int) -> str:
 
 
 def render_client_line(stat: ClientStat) -> str:
+    """One pipe-separated client line: counts, workload ratio, last outcome."""
     name = stat.client
     if len(name) > MAX_CLIENT_NAME_CHARS:
         name = name[: MAX_CLIENT_NAME_CHARS - 1] + "…"
@@ -333,6 +358,7 @@ def render_client_line(stat: ClientStat) -> str:
 
 
 def render_staff_line(stat: StaffStat) -> str:
+    """One pipe-separated employee line: volume, top domains, mean margin."""
     parts = [f"{stat.employee}: {stat.tasks} task"]
     parts.append(f"{stat.ok} ok / {stat.fail} fail / {stat.in_flight} in flight")
     if stat.domains:
@@ -388,6 +414,7 @@ def render_client_view(
 
 
 def render_staff_view(stats: Iterable[StaffStat], *, token_budget: int = 200) -> str:
+    """Attendance-ordered staff lines, truncated to a fixed token budget."""
     lines = [render_staff_line(s) for s in stats]
     return _render(lines, STAFF_VIEW_HEADER, token_budget)
 

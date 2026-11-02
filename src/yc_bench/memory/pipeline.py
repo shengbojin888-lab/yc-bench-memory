@@ -34,6 +34,8 @@ MODE_STRUCTURED = "structured"
 
 @dataclass
 class MemorySettings:
+    """Knobs for the memory layer; the defaults describe variant (ii)."""
+
     mode: str = MODE_OFF
     inject_client_view: bool = True
     inject_staff_view: bool = False
@@ -45,15 +47,19 @@ class MemorySettings:
 
     @property
     def enabled(self) -> bool:
+        """True when the layer should observe and inject anything at all."""
         return self.mode != MODE_OFF
 
 
 class StructuredMemory:
+    """The only object the agent loop holds: record a turn, read a block."""
+
     def __init__(
         self,
         store: MemoryStore | None = None,
         settings: MemorySettings | None = None,
     ) -> None:
+        """Wrap an existing store (resume) or start a fresh in-memory one."""
         self.settings = settings or MemorySettings()
         # NB: `store or MemoryStore(None)` would silently discard a real store,
         # because MemoryStore defines __len__ and a fresh (empty) log is falsy.
@@ -159,6 +165,12 @@ class StructuredMemory:
     # -- diagnostics ------------------------------------------------------
 
     def diagnostics(self) -> dict[str, Any]:
+        """Counters copied into the run summary.
+
+        ``followups_failed`` is the one to watch: a non-zero value means reads
+        were attempted but did not land, a failure that would otherwise be
+        misread as "the agent simply never inspected anything".
+        """
         records = build_records(self.store.events())
         stats = client_stats(records)
         return {

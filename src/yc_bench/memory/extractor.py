@@ -140,6 +140,7 @@ class StructuredExtractor:
     """Turns one turn's observations into zero or more append-only events."""
 
     def __init__(self) -> None:
+        """Start with empty join state; call :meth:`prime` for a resumed log."""
         # title -> what ``market browse`` advertised for it.
         self.market: dict[str, dict[str, Any]] = {}
         # title -> task_keys accepted but not yet resolved, oldest first.

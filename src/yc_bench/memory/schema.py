@@ -98,6 +98,12 @@ class MemoryEvent:
     v: int = SCHEMA_VERSION
 
     def to_dict(self) -> dict[str, Any]:
+        """Return the JSON-ready form written to the log.
+
+        Every field is emitted even when empty so a line is self-describing:
+        the reader never has to guess whether a missing key means "not yet
+        observed" or "this schema version did not have the field".
+        """
         return {
             "v": self.v,
             "type": self.type,
@@ -112,6 +118,12 @@ class MemoryEvent:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "MemoryEvent":
+        """Rebuild an event from one decoded log line.
+
+        ``type`` and ``task_key`` are required because an event without either
+        cannot be placed; the rest fall back to neutral values so a line written
+        by an older schema version still loads instead of failing the run.
+        """
         return cls(
             type=raw["type"],
             task_key=raw["task_key"],
@@ -147,6 +159,12 @@ def make_evidence(
     sim_time: str | None = None,
     actor: str = ACTOR_AGENT,
 ) -> dict[str, Any]:
+    """Record why an event exists: which command, at which turn and time.
+
+    ``actor`` separates what the agent did itself (``agent``) from what the
+    extractor read on its behalf (``extractor``), so a claim in the rendered
+    view can always be traced back to the command that produced it.
+    """
     return {
         "cmd": command,
         "turn": turn,
